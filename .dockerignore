@@ -1,9 +1,0 @@
-.git
-.gitignore
-node_modules
-Dockerfile
-nginx.conf
-README.md
-ARCHITECTURE.md
-AI_AND_JSON.md
-.DS_Store
