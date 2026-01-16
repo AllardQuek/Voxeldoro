@@ -1,0 +1,6 @@
+.git
+.gitignore
+node_modules
+Dockerfile
+nginx.conf
+.DS_Store
