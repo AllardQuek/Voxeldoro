@@ -1,6 +1,6 @@
-.git
-.gitignore
 node_modules
-Dockerfile
-nginx.conf
+dist
+.git
 .DS_Store
+*.md
+docs
