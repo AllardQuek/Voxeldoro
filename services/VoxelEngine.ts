@@ -1,4 +1,3 @@
-
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -7,7 +6,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { AppState, SimulationVoxel, RebuildTarget, VoxelData } from '../types';
-import { CONFIG, COLORS } from '../utils/voxelConstants';
+import { CONFIG } from '../utils/voxelConstants';
 
 export class VoxelEngine {
   private container: HTMLElement;
@@ -55,7 +54,7 @@ export class VoxelEngine {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.autoRotate = true;
-    this.controls.autoRotateSpeed = 2.0; 
+    this.controls.autoRotateSpeed = 0.2; // Drastically reduced for a very calm feel
     this.controls.target.set(0, 0, 0);
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
@@ -72,8 +71,10 @@ export class VoxelEngine {
     dirLight.shadow.camera.bottom = -50;
     this.scene.add(dirLight);
 
-    const planeMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 1 });
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), planeMat);
+    // Shadow-only floor: catches shadows without being a visible "grey square"
+    const floorGeometry = new THREE.PlaneGeometry(2000, 2000);
+    const floorMaterial = new THREE.ShadowMaterial({ opacity: 0.04 });
+    const floor = new THREE.Mesh(floorGeometry, floorMaterial);
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = CONFIG.FLOOR_Y;
     floor.receiveShadow = true;
@@ -83,26 +84,20 @@ export class VoxelEngine {
     this.animate();
   }
 
-  private centerCameraOnModel() {
-    if (this.voxels.length === 0) return;
+  private centerCameraOnTarget(data: VoxelData[]) {
+    if (data.length === 0) return;
 
     const box = new THREE.Box3();
-    this.voxels.forEach(v => {
-      if (v.y > CONFIG.FLOOR_Y - 5) {
-        box.expandByPoint(new THREE.Vector3(v.x, v.y, v.z));
-      }
+    data.forEach(v => {
+      box.expandByPoint(new THREE.Vector3(v.x, v.y, v.z));
     });
-
-    if (box.isEmpty()) return;
 
     const center = new THREE.Vector3();
     box.getCenter(center);
     
-    // UI HEADROOM OFFSET: Target a point higher than the model to visually "push" the model down
-    const verticalOffset = 10; 
-    const targetY = Math.max(center.y, CONFIG.FLOOR_Y) + verticalOffset;
-    
-    this.controls.target.lerp(new THREE.Vector3(center.x, targetY, center.z), 0.1);
+    // Smoothly update target center
+    const newTarget = new THREE.Vector3(center.x, center.y, center.z);
+    this.controls.target.copy(newTarget);
   }
 
   public loadInitialModel(data: VoxelData[]) {
@@ -110,12 +105,7 @@ export class VoxelEngine {
     this.onCountChange(this.voxels.length);
     this.state = AppState.STABLE;
     this.onStateChange(this.state);
-    
-    const box = new THREE.Box3();
-    data.forEach(v => box.expandByPoint(new THREE.Vector3(v.x, v.y, v.z)));
-    const center = new THREE.Vector3();
-    box.getCenter(center);
-    this.controls.target.set(center.x, Math.max(center.y, CONFIG.FLOOR_Y + 12), center.z);
+    this.centerCameraOnTarget(data);
   }
 
   private createVoxels(data: VoxelData[]) {
@@ -204,6 +194,8 @@ export class VoxelEngine {
     this.isProgressive = progressive;
     this.manualProgress = 0;
     
+    this.centerCameraOnTarget(targetModel);
+
     if (targetModel.length > this.voxels.length) {
       this.createVoxels(targetModel);
       this.onCountChange(this.voxels.length);
@@ -279,7 +271,6 @@ export class VoxelEngine {
             const targetX = t.x;
             const targetZ = t.z;
 
-            // Instant lerp for scrubbing
             const lerpSpeed = this.isProgressive ? 0.4 : 0.15;
             
             v.x += (targetX - v.x) * lerpSpeed;
@@ -299,10 +290,6 @@ export class VoxelEngine {
             this.onStateChange(this.state);
         }
     }
-    
-    if (this.state !== AppState.STABLE) {
-      this.centerCameraOnModel();
-    }
   }
 
   private animate() {
@@ -321,7 +308,7 @@ export class VoxelEngine {
   
   public setAutoRotate(enabled: boolean) { this.controls.autoRotate = enabled; }
   public getJsonData(): string {
-    return JSON.stringify(this.voxels.map((v, i) => ({ x: +v.x.toFixed(2), y: +v.y.toFixed(2), z: +v.z.toFixed(2), c: '#' + v.color.getHexString() })), null, 2);
+    return JSON.stringify(this.voxels.map((v) => ({ x: +v.x.toFixed(2), y: +v.y.toFixed(2), z: +v.z.toFixed(2), c: '#' + v.color.getHexString() })), null, 2);
   }
   public getUniqueColors(): string[] {
     const colors = new Set<string>();

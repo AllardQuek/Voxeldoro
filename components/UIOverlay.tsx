@@ -210,7 +210,11 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                 <Settings2 size={16} />
             </button>
             <button onClick={onToggleRotation} className={`w-9 h-9 flex items-center justify-center rounded-xl bg-white shadow-sm border transition-all ${isAutoRotate ? 'text-indigo-600 border-indigo-100' : 'text-slate-300 border-slate-100'}`}>
-                <Rotate3d size={16} className={isAutoRotate ? 'animate-spin' : ''} />
+                <Rotate3d 
+                  size={16} 
+                  style={{ animationDuration: '12s' }}
+                  className={isAutoRotate ? 'animate-spin' : ''} 
+                />
             </button>
         </div>
 
