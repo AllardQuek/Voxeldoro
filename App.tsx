@@ -1,9 +1,10 @@
+
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { VoxelEngine } from './services/VoxelEngine';
 import { UIOverlay } from './components/UIOverlay';
 import { JsonModal } from './components/JsonModal';
@@ -18,26 +19,17 @@ const POMODORO_BREAK_TIME = 5 * 60;
 
 const PRESET_KEYS: (keyof typeof Generators)[] = ['Eagle', 'Cat', 'Rabbit', 'Twins'];
 
-/**
- * Normalizes voxel data so it is centered on X/Z and sits on Y=0
- */
 const normalizeVoxels = (voxels: VoxelData[]): VoxelData[] => {
   if (voxels.length === 0) return voxels;
-  
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  let minZ = Infinity, maxZ = -Infinity;
-
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
   voxels.forEach(v => {
     minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x);
     minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y);
     minZ = Math.min(minZ, v.z); maxZ = Math.max(maxZ, v.z);
   });
-
   const offsetX = -(minX + maxX) / 2;
   const offsetY = -minY; 
   const offsetZ = -(minZ + maxZ) / 2;
-
   return voxels.map(v => ({
     ...v,
     x: Math.round(v.x + offsetX),
@@ -49,48 +41,44 @@ const normalizeVoxels = (voxels: VoxelData[]): VoxelData[] => {
 const App: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<VoxelEngine | null>(null);
+  const scrubbingDirection = useRef<number>(0); 
+  const isCompleting = useRef<boolean>(false);
   
   const [appState, setAppState] = useState<AppState>(AppState.STABLE);
   const [voxelCount, setVoxelCount] = useState<number>(0);
-  
+  const [totalVoxelCount, setTotalVoxelCount] = useState<number>(0);
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
   const [jsonModalMode, setJsonModalMode] = useState<'view' | 'import'>('view');
-  
   const [isPromptModalOpen, setIsPromptModalOpen] = useState(false);
   const [promptMode, setPromptMode] = useState<'create' | 'morph'>('create');
   
-  // Use localStorage to avoid annoying repeat users
-  const [showWelcome, setShowWelcome] = useState(() => {
-    const seen = localStorage.getItem('voxeldoro_welcome_dismissed');
-    return !seen;
-  });
-  
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('voxeldoro_welcome_dismissed'));
   const [isGenerating, setIsGenerating] = useState(false);
   const [jsonData, setJsonData] = useState('');
   const [isAutoRotate, setIsAutoRotate] = useState(true);
 
-  // --- Statistics ---
   const [buildStats, setBuildStats] = useState<Record<string, number>>(() => {
     const saved = localStorage.getItem('voxel_pomodoro_stats');
     return saved ? JSON.parse(saved) : {};
   });
 
-  // --- Pomodoro State ---
-  const [timeLeft, setTimeLeft] = useState(POMODORO_WORK_TIME);
+  const [timeLeft, setTimeLeft] = useState<number>(POMODORO_WORK_TIME);
   const [isTimerActive, setIsTimerActive] = useState(false);
   const [isWorkMode, setIsWorkMode] = useState(true);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
   const [sessionStarted, setSessionStarted] = useState(false);
 
-  // --- State for Models ---
+  const manualProgress = useMemo(() => {
+    const total = isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
+    return Math.min(1, Math.max(0, (total - timeLeft) / total));
+  }, [timeLeft, isWorkMode]);
+
   const [currentBaseModel, setCurrentBaseModel] = useState<string>('Eagle');
   const [nextTargetModel, setNextTargetModel] = useState<{ name: string, data: VoxelData[] }>({
     name: 'Eagle',
     data: normalizeVoxels(Generators.Eagle())
   });
-  
   const [customBuilds, setCustomBuilds] = useState<SavedModel[]>([]);
-  const [customRebuilds, setCustomRebuilds] = useState<SavedModel[]>([]);
 
   useEffect(() => {
     localStorage.setItem('voxel_pomodoro_stats', JSON.stringify(buildStats));
@@ -98,283 +86,327 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!containerRef.current) return;
-
     const engine = new VoxelEngine(
-      containerRef.current,
-      (newState) => setAppState(newState),
-      (count) => setVoxelCount(count)
+      containerRef.current, 
+      setAppState, 
+      (active, total) => {
+        setVoxelCount(active);
+        setTotalVoxelCount(total);
+      }
     );
-
     engineRef.current = engine;
     engine.loadInitialModel(nextTargetModel.data);
 
     const handleResize = () => engine.handleResize();
     window.addEventListener('resize', handleResize);
-
     return () => {
       window.removeEventListener('resize', handleResize);
       engine.cleanup();
     };
   }, []);
 
-  const handleDismissWelcome = () => {
-    setShowWelcome(false);
-    localStorage.setItem('voxeldoro_welcome_dismissed', 'true');
-  };
-
-  const queueNextRandomModel = () => {
+  const queueNextRandomModel = useCallback(() => {
     const others = PRESET_KEYS.filter(k => k !== currentBaseModel);
     const nextKey = others[Math.floor(Math.random() * others.length)];
     const data = normalizeVoxels(Generators[nextKey]());
     setNextTargetModel({ name: nextKey, data });
-  };
+  }, [currentBaseModel]);
 
-  // Timer Effect
   useEffect(() => {
     let interval: number;
-    if (isTimerActive && timeLeft > 0) {
+    if (isTimerActive) {
       interval = window.setInterval(() => {
-        setTimeLeft(prev => Math.max(0, prev - speedMultiplier));
-      }, 1000);
-    } else if (timeLeft === 0 && isTimerActive) {
-      setIsTimerActive(false);
-      setSessionStarted(false);
-      
-      if (engineRef.current) {
-          engineRef.current.finishRebuild();
-          setBuildStats(prev => ({
-            ...prev,
-            [currentBaseModel]: (prev[currentBaseModel] || 0) + 1
-          }));
-
-          if (isWorkMode) {
-              queueNextRandomModel();
-          }
-      }
+        setTimeLeft(prev => {
+            const step = (speedMultiplier * 0.1); 
+            const next = prev - step;
+            return next <= 0 ? 0 : next;
+        });
+      }, 100);
     }
     return () => clearInterval(interval);
-  }, [isTimerActive, timeLeft, isWorkMode, speedMultiplier, currentBaseModel]);
+  }, [isTimerActive, speedMultiplier]);
 
-  // Real-time engine sync for timeLeft changes (Scrubbing)
+  useEffect(() => {
+      if (timeLeft <= 0 && sessionStarted && !isCompleting.current) {
+          isCompleting.current = true;
+          setIsTimerActive(false);
+          setSessionStarted(false);
+          
+          if (engineRef.current) {
+              engineRef.current.finishRebuild();
+              setBuildStats(prev => ({
+                ...prev,
+                [currentBaseModel]: (prev[currentBaseModel] || 0) + 1
+              }));
+          }
+          
+          setTimeout(() => { isCompleting.current = false; }, 400);
+      }
+  }, [timeLeft, sessionStarted, currentBaseModel]);
+
   useEffect(() => {
     if (engineRef.current && sessionStarted) {
-      const total = isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
-      const progress = (total - timeLeft) / total;
-      engineRef.current.setProgress(progress);
+      engineRef.current.setProgress(manualProgress);
     }
-  }, [timeLeft, sessionStarted, isWorkMode]);
+  }, [manualProgress, sessionStarted]);
 
-  const handleStartPomodoro = () => {
-    if (!engineRef.current) return;
+  const handleStartPomodoro = useCallback(() => {
+    if (!engineRef.current || isCompleting.current) return;
     
+    let targetData = nextTargetModel.data;
+    let targetName = nextTargetModel.name;
+
+    // Handle end-of-session mode switch
+    if (timeLeft <= 0) {
+        const nextMode = !isWorkMode;
+        setIsWorkMode(nextMode);
+        const nextTime = nextMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
+        setTimeLeft(nextTime);
+        if (nextMode) queueNextRandomModel();
+        // Since state updates are async, we use the values we just calculated
+        targetName = nextTargetModel.name;
+        targetData = nextTargetModel.data;
+    }
+
     setSessionStarted(true);
     setIsTimerActive(true);
-    const total = isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
-    setTimeLeft(total);
-
-    engineRef.current.dismantle();
-    setCurrentBaseModel(nextTargetModel.name);
     
-    setTimeout(() => {
-      if (engineRef.current) {
-        engineRef.current.rebuild(nextTargetModel.data, true);
-        engineRef.current.setProgress(0);
-      }
-    }, 600);
-  };
+    engineRef.current.dismantle();
+    setCurrentBaseModel(targetName);
+    engineRef.current.rebuild(targetData, true);
+    engineRef.current.setProgress(0);
 
-  const handleToggleTimer = () => setIsTimerActive(!isTimerActive);
+  }, [isWorkMode, nextTargetModel, timeLeft, queueNextRandomModel]);
+
+  const handleToggleTimer = useCallback(() => {
+    if (timeLeft <= 0 || !sessionStarted) {
+      handleStartPomodoro();
+    } else {
+      setIsTimerActive(prev => !prev);
+    }
+  }, [timeLeft, sessionStarted, handleStartPomodoro]);
   
-  const handleResetTimer = () => {
+  const handleResetTimer = useCallback(() => {
     setIsTimerActive(false);
     setSessionStarted(false);
+    isCompleting.current = false;
     setSpeedMultiplier(1);
-    setTimeLeft(isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME);
+    const total = isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
+    setTimeLeft(total);
     if (engineRef.current) {
-        const currentData = Generators[currentBaseModel as keyof typeof Generators]?.() || nextTargetModel.data;
-        engineRef.current.loadInitialModel(normalizeVoxels(currentData));
+        // Stick to the same build we were doing
+        engineRef.current.loadInitialModel(nextTargetModel.data);
     }
-  };
+  }, [isWorkMode, nextTargetModel]);
 
-  const handleSwitchMode = () => {
+  const handleSwitchMode = useCallback(() => {
     const nextMode = !isWorkMode;
     setIsWorkMode(nextMode);
     setTimeLeft(nextMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME);
     setIsTimerActive(false);
     setSessionStarted(false);
+    isCompleting.current = false;
     setSpeedMultiplier(1);
     
-    const defaultKey = nextMode ? 'Eagle' : 'Cat';
-    const defaultData = normalizeVoxels(Generators[defaultKey as keyof typeof Generators]());
-    setNextTargetModel({ name: defaultKey, data: defaultData });
-    setCurrentBaseModel(defaultKey);
-    if (engineRef.current) engineRef.current.loadInitialModel(defaultData);
-  };
+    // Maintain current build selection when switching modes manually
+    if (engineRef.current) engineRef.current.loadInitialModel(nextTargetModel.data);
+  }, [isWorkMode, nextTargetModel]);
 
-  const handleNewScene = (type: keyof typeof Generators) => {
-    const generator = Generators[type];
-    if (generator && engineRef.current) {
-      const data = normalizeVoxels(generator());
-      setNextTargetModel({ name: type, data });
-      setCurrentBaseModel(type);
-      engineRef.current.loadInitialModel(data);
-      setSessionStarted(false); 
-      setIsTimerActive(false);
-      setTimeLeft(isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME);
-    }
-  };
-
-  const handleToggleRotation = () => {
-    setIsAutoRotate(prev => {
-      const nextValue = !prev;
-      if (engineRef.current) {
-        engineRef.current.setAutoRotate(nextValue);
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (isPromptModalOpen || isJsonModalOpen) return;
+      const key = e.key.toLowerCase();
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleToggleTimer();
       }
-      return nextValue;
-    });
-  };
+      if (key === 'k') scrubbingDirection.current = -1;
+      if (key === 'l') scrubbingDirection.current = 1;
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (key === 'k' || key === 'l') scrubbingDirection.current = 0;
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [handleToggleTimer, isPromptModalOpen, isJsonModalOpen]);
 
-  const handleJsonImport = (json: string) => {
-    try {
-      const rawData = JSON.parse(json);
-      const dataToImport = Array.isArray(rawData) ? rawData : [];
-      const voxelData: VoxelData[] = dataToImport.map((v: any) => {
-        let color = 0xCCCCCC;
-        if (v.c && typeof v.c === 'string') {
-          color = parseInt(v.c.replace('#', ''), 16);
-        } else if (v.color !== undefined) {
-          color = typeof v.color === 'string' ? parseInt(v.color.replace('#', ''), 16) : Number(v.color);
+  useEffect(() => {
+    let rafId: number;
+    const updateScrub = () => {
+      if (scrubbingDirection.current !== 0) {
+        const total = isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
+        const deltaSeconds = -scrubbingDirection.current * 4; 
+        setTimeLeft(prev => {
+          const next = Math.min(total, Math.max(0, prev + deltaSeconds));
+          
+          if (!sessionStarted && next < total) {
+              setSessionStarted(true);
+              setIsTimerActive(false);
+              if (engineRef.current && appState === AppState.STABLE) {
+                engineRef.current.dismantle(); 
+                engineRef.current.rebuild(nextTargetModel.data, true);
+              }
+          }
+          
+          return next;
+        });
+      }
+      rafId = requestAnimationFrame(updateScrub);
+    };
+    rafId = requestAnimationFrame(updateScrub);
+    return () => cancelAnimationFrame(rafId);
+  }, [isWorkMode, sessionStarted, nextTargetModel, appState]);
+
+  // SMART MORPH HANDLER
+  const handleSelectModel = useCallback((name: string, data: VoxelData[]) => {
+    setNextTargetModel({ name, data });
+    setCurrentBaseModel(name);
+    
+    if (engineRef.current) {
+        if (sessionStarted && !isCompleting.current) {
+            // Morph mid-session
+            engineRef.current.rebuild(data, true);
+        } else {
+            // Fresh load if not in session or session just completed
+            engineRef.current.loadInitialModel(data);
         }
-        return {
-          x: Number(v.x || 0),
-          y: Number(v.y || 0),
-          z: Number(v.z || 0),
-          color
-        };
-      });
-
-      const normalized = normalizeVoxels(voxelData);
-      if (engineRef.current) {
-        const name = "Imported Build";
-        setNextTargetModel({ name, data: normalized });
-        setCurrentBaseModel(name);
-        engineRef.current.loadInitialModel(normalized);
-        setSessionStarted(false);
-        setIsTimerActive(false);
-        setTimeLeft(isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME);
-      }
-    } catch (e) {
-      console.error("Import failed", e);
     }
-  };
+  }, [sessionStarted]);
 
   const handlePromptSubmit = async (prompt: string) => {
-    if (!process.env.API_KEY) throw new Error("API Key not found");
     setIsGenerating(true);
-    setIsPromptModalOpen(false);
-
     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-pro-preview',
-            contents: `Create a 3D voxel representation of "${prompt}".
-            RULES: Y is UP. Center on X/Z. Faces positive Z. Return JSON array of {x, y, z, color}. Max 600 voxels.`,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: {
-                    type: Type.ARRAY,
-                    items: {
-                        type: Type.OBJECT,
-                        properties: {
-                            x: { type: Type.INTEGER },
-                            y: { type: Type.INTEGER },
-                            z: { type: Type.INTEGER },
-                            color: { type: Type.STRING }
-                        },
-                        required: ["x", "y", "z", "color"]
-                    }
-                }
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-pro-preview',
+        contents: `Create a 3D voxel model based on the prompt: "${prompt}". 
+        Return a JSON array of voxel objects. Each object must have x, y, z and c (hex color).`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.INTEGER },
+                y: { type: Type.INTEGER },
+                z: { type: Type.INTEGER },
+                c: { type: Type.STRING }
+              },
+              required: ['x', 'y', 'z', 'c']
             }
-        });
-
-        if (response.text) {
-            const rawData = JSON.parse(response.text);
-            const voxelData: VoxelData[] = rawData.map((v: any) => ({
-                x: v.x, y: v.y, z: v.z,
-                color: parseInt(v.color.replace('#', ''), 16) || 0xCCCCCC
-            }));
-
-            const normalized = normalizeVoxels(voxelData);
-
-            if (engineRef.current) {
-                setNextTargetModel({ name: prompt, data: normalized });
-                setCurrentBaseModel(prompt);
-                engineRef.current.loadInitialModel(normalized);
-                setCustomBuilds(prev => [...prev, { name: prompt, data: normalized }]);
-                setSessionStarted(false);
-            }
+          }
         }
+      });
+
+      const text = response.text;
+      if (text) {
+        const rawData = JSON.parse(text);
+        const voxels: VoxelData[] = rawData.map((v: any) => ({
+          x: Number(v.x),
+          y: Number(v.y),
+          z: Number(v.z),
+          color: parseInt(v.c.replace('#', ''), 16)
+        }));
+        const normalized = normalizeVoxels(voxels);
+        const name = prompt.length > 20 ? prompt.substring(0, 17) + '...' : prompt;
+        setCustomBuilds(prev => [...prev, { name, data: normalized }]);
+        handleSelectModel(name, normalized);
+      }
     } catch (err) {
-        console.error("Generation failed", err);
+      console.error('Gemini AI Error:', err);
     } finally {
-        setIsGenerating(false);
+      setIsGenerating(false);
+    }
+  };
+
+  const handleImport = (json: string) => {
+    try {
+      const data = JSON.parse(json);
+      const voxels: VoxelData[] = data.map((v: any) => ({
+        x: v.x, y: v.y, z: v.z,
+        color: typeof v.c === 'string' ? parseInt(v.c.replace('#', ''), 16) : v.color
+      }));
+      const normalized = normalizeVoxels(voxels);
+      handleSelectModel('Imported', normalized);
+    } catch (e) {
+      console.error('Import Error:', e);
     }
   };
 
   return (
-    <div className="relative w-full h-screen bg-[#f0f2f5] overflow-hidden">
-      <div ref={containerRef} className="absolute inset-0 z-0" />
-      
-      <UIOverlay 
+    <div className="relative w-full h-full bg-slate-100 overflow-hidden">
+      <div ref={containerRef} className="absolute inset-0" />
+      <WelcomeScreen visible={showWelcome} onClose={() => {
+        setShowWelcome(false);
+        localStorage.setItem('voxeldoro_welcome_dismissed', 'true');
+      }} />
+      <UIOverlay
         voxelCount={voxelCount}
+        totalVoxelCount={totalVoxelCount}
         appState={appState}
         currentBaseModel={currentBaseModel}
-        nextTargetModelName={nextTargetModel.name}
         customBuilds={customBuilds}
-        customRebuilds={customRebuilds.filter(r => r.baseModel === currentBaseModel)} 
         buildStats={buildStats}
         isAutoRotate={isAutoRotate}
-        isInfoVisible={showWelcome}
         isGenerating={isGenerating}
-        timeLeft={timeLeft}
+        timeLeft={Math.floor(timeLeft)}
         isTimerActive={isTimerActive}
         isWorkMode={isWorkMode}
         sessionStarted={sessionStarted}
         speedMultiplier={speedMultiplier}
         onSetSpeedMultiplier={setSpeedMultiplier}
-        onDismantle={() => engineRef.current?.dismantle()}
-        onRebuild={handleNewScene}
-        onNewScene={handleNewScene}
-        onSelectCustomBuild={(m) => {
-            const data = normalizeVoxels(m.data);
-            setNextTargetModel({ name: m.name, data });
-            setCurrentBaseModel(m.name);
-            engineRef.current?.loadInitialModel(data);
-            setSessionStarted(false);
-            setIsTimerActive(false);
-            setTimeLeft(isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME);
+        onNewScene={(key) => {
+          const data = normalizeVoxels(Generators[key as keyof typeof Generators]());
+          handleSelectModel(key, data);
         }}
-        onSelectCustomRebuild={(m) => engineRef.current?.rebuild(normalizeVoxels(m.data))}
+        onSelectCustomBuild={(m) => {
+          handleSelectModel(m.name, m.data);
+        }}
         onPromptCreate={() => { setPromptMode('create'); setIsPromptModalOpen(true); }}
-        onPromptMorph={() => { setPromptMode('morph'); setIsPromptModalOpen(true); }}
         onShowJson={() => {
-            setJsonData(engineRef.current?.getJsonData() || '');
+          if (engineRef.current) {
+            setJsonData(engineRef.current.getJsonData());
             setJsonModalMode('view');
             setIsJsonModalOpen(true);
+          }
         }}
-        onImportJson={() => { setJsonModalMode('import'); setIsJsonModalOpen(true); }}
-        onToggleRotation={handleToggleRotation}
-        onToggleInfo={() => setShowWelcome(!showWelcome)}
+        onToggleRotation={() => {
+          const newState = !isAutoRotate;
+          setIsAutoRotate(newState);
+          if (engineRef.current) engineRef.current.setAutoRotate(newState);
+        }}
+        onToggleInfo={() => setShowWelcome(true)}
         onStartPomodoro={handleStartPomodoro}
         onToggleTimer={handleToggleTimer}
         onResetTimer={handleResetTimer}
         onSwitchMode={handleSwitchMode}
-        onSetTime={(t) => setTimeLeft(t)}
+        onResetCamera={() => engineRef.current?.resetCameraView()}
+        onClearGarden={() => {
+          setBuildStats({});
+          localStorage.removeItem('voxel_pomodoro_stats');
+        }}
+        manualProgress={manualProgress}
+        onSetManualProgress={(p) => {
+            if (!sessionStarted && !isCompleting.current) {
+              setSessionStarted(true);
+              setIsTimerActive(false); 
+              if (engineRef.current) {
+                engineRef.current.dismantle();
+                engineRef.current.rebuild(nextTargetModel.data, true);
+              }
+            }
+            const total = isWorkMode ? POMODORO_WORK_TIME : POMODORO_BREAK_TIME;
+            setTimeLeft(total * (1 - p));
+        }}
       />
-
-      <WelcomeScreen visible={showWelcome} onClose={handleDismissWelcome} />
-      <JsonModal isOpen={isJsonModalOpen} onClose={() => setIsJsonModalOpen(false)} data={jsonData} isImport={jsonModalMode === 'import'} onImport={handleJsonImport} />
       <PromptModal isOpen={isPromptModalOpen} mode={promptMode} onClose={() => setIsPromptModalOpen(false)} onSubmit={handlePromptSubmit} />
+      <JsonModal isOpen={isJsonModalOpen} onClose={() => setIsJsonModalOpen(false)} data={jsonData} isImport={jsonModalMode === 'import'} onImport={handleImport} />
     </div>
   );
 };
